@@ -746,15 +746,23 @@ async def _read_webpage(arguments: dict) -> str:
 
     # Method 2: Direct httpx fetch + strip HTML tags
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
-            resp = await client.get(
-                url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Accept": "text/html,text/plain;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                },
-            )
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept-Encoding": "identity",
+            "Referer": origin + "/",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+        }
+        async with httpx.AsyncClient(follow_redirects=True, timeout=20, verify=False) as client:
+            resp = await client.get(url, headers=headers)
+
+        if resp.status_code >= 400:
+            return f"❌ Server returned HTTP {resp.status_code} for {url}"
 
         # Detect encoding — many Chinese gov sites use GBK/GB2312
         content_type = resp.headers.get("content-type", "")
@@ -762,7 +770,7 @@ async def _read_webpage(arguments: dict) -> str:
         charset = charset_m.group(1).lower() if charset_m else ''
         if not charset:
             # Try to detect from meta tag in raw bytes
-            raw_head = resp.content[:2000].decode('ascii', errors='ignore')
+            raw_head = resp.content[:3000].decode('ascii', errors='ignore')
             meta_m = re.search(r'charset=["\']?([^"\'\s;>]+)', raw_head, re.IGNORECASE)
             charset = meta_m.group(1).lower() if meta_m else 'utf-8'
 

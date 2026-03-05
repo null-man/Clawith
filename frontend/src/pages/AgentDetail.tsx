@@ -440,8 +440,17 @@ export default function AgentDetail() {
     // Load chat history + connect websocket when chat tab is active
     const parseChatMsg = (msg: ChatMsg): ChatMsg => {
         if (msg.role !== 'user') return msg;
-        const m = msg.content.match(/^\[file:([^\]]+)\]\n?/);
-        if (m) return { ...msg, fileName: m[1], content: msg.content.slice(m[0].length) };
+        // New format: [file:name.pdf]\ncontent
+        const newFmt = msg.content.match(/^\[file:([^\]]+)\]\n?/);
+        if (newFmt) return { ...msg, fileName: newFmt[1], content: msg.content.slice(newFmt[0].length) || `\u2307 ${newFmt[1]}` };
+        // Old format: [File: name.pdf]\nFile location:...\nQuestion: user_msg
+        const oldFmt = msg.content.match(/^\[File: ([^\]]+)\]/);
+        if (oldFmt) {
+            const fileName = oldFmt[1];
+            const qMatch = msg.content.match(/\nQuestion: ([\s\S]+)$/);
+            const content = qMatch ? qMatch[1].trim() : `\u2307 ${fileName}`;
+            return { ...msg, fileName, content };
+        }
         return msg;
     };
 
