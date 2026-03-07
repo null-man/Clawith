@@ -342,12 +342,42 @@ async def feishu_event_webhook(
             _reply_to_id = chat_id if chat_type == "group" else sender_open_id
             _rid_type = "chat_id" if chat_type == "group" else "open_id"
             async def _feishu_file_sender(file_path, msg: str = ""):
-                await feishu_service.upload_and_send_file(
-                    config.app_id, config.app_secret,
-                    _reply_to_id, file_path,
-                    receive_id_type=_rid_type,
-                    accompany_msg=msg,
-                )
+                try:
+                    await feishu_service.upload_and_send_file(
+                        config.app_id, config.app_secret,
+                        _reply_to_id, file_path,
+                        receive_id_type=_rid_type,
+                        accompany_msg=msg,
+                    )
+                except Exception as _upload_err:
+                    # Fallback: send a download link when upload permission is not granted
+                    from pathlib import Path as _P
+                    from app.config import get_settings as _gs_fallback
+                    _fs = _gs_fallback()
+                    _base_url = getattr(_fs, 'BASE_URL', '').rstrip('/') or ''
+                    _fp = _P(file_path)
+                    _ws_root = _P(_fs.AGENT_DATA_DIR)
+                    try:
+                        _rel = str(_fp.relative_to(_ws_root / str(agent_id)))
+                    except ValueError:
+                        _rel = _fp.name
+                    _fallback_parts = []
+                    if msg:
+                        _fallback_parts.append(msg)
+                    if _base_url:
+                        _dl_url = f"{_base_url}/api/agents/{agent_id}/files/download?path={_rel}"
+                        _fallback_parts.append(f"📎 {_fp.name}\n🔗 {_dl_url}")
+                    _fallback_parts.append(
+                        f"⚠️ 文件直接发送失败（{_upload_err}）\n"
+                        "如需 Agent 直接发飞书文件，请在飞书开放平台为应用开启 "
+                        "`im:resource`（即 `im:resource:upload`）权限并发布版本。"
+                    )
+                    await feishu_service.send_message(
+                        config.app_id, config.app_secret,
+                        _reply_to_id, "text",
+                        json.dumps({"text": "\n\n".join(_fallback_parts)}),
+                        receive_id_type=_rid_type,
+                    )
             _cfs_token = _cfs.set(_feishu_file_sender)
 
             # Call LLM with history
