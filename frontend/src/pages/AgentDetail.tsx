@@ -1050,7 +1050,7 @@ export default function AgentDetail() {
                                 <span className={`status-dot ${statusKey}`} />
                                 {t(`agent.status.${statusKey}`)}
                                 {editingRole ? (
-                                    <input
+                                    <textarea
                                         autoFocus
                                         value={roleInput}
                                         onChange={e => setRoleInput(e.target.value)}
@@ -1062,13 +1062,15 @@ export default function AgentDetail() {
                                             }
                                         }}
                                         onKeyDown={async e => {
-                                            if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                                            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); (e.target as HTMLTextAreaElement).blur(); }
                                             if (e.key === 'Escape') { setEditingRole(false); setRoleInput(agent.role_description || ''); }
                                         }}
+                                        rows={2}
                                         style={{
                                             background: 'var(--bg-elevated)', border: '1px solid var(--accent-primary)',
-                                            borderRadius: '4px', color: 'var(--text-primary)', fontSize: '13px',
-                                            padding: '2px 6px', width: '320px', outline: 'none',
+                                            borderRadius: '6px', color: 'var(--text-primary)', fontSize: '13px',
+                                            padding: '6px 10px', width: 'min(500px, 50vw)', outline: 'none',
+                                            resize: 'vertical', lineHeight: '1.5', fontFamily: 'inherit',
                                         }}
                                     />
                                 ) : (
@@ -1188,9 +1190,9 @@ export default function AgentDetail() {
                                 <div className="card">
                                     <h3 style={{ fontSize: '14px', fontWeight: 600, marginBottom: '12px' }}>📋 Agent Profile</h3>
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
-                                            <span style={{ color: 'var(--text-tertiary)' }}>{t('agent.fields.role')}</span>
-                                            <span>{agent.role_description || '—'}</span>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', gap: '12px' }}>
+                                            <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}>{t('agent.fields.role')}</span>
+                                            <span title={agent.role_description || ''} style={{ textAlign: 'right', overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as any }}>{agent.role_description || '—'}</span>
                                         </div>
                                         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
                                             <span style={{ color: 'var(--text-tertiary)' }}>Created</span>

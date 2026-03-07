@@ -65,17 +65,28 @@ class MCPClient:
                 data = resp.json()
 
                 if "error" in data:
-                    return f"❌ MCP 工具执行错误: {data['error'].get('message', str(data['error']))[:200]}"
+                    err = data["error"]
+                    msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+                    return f"❌ MCP 工具执行错误: {msg[:200]}"
 
                 result = data.get("result", {})
+                # Some servers return a plain string instead of a structured result
+                if isinstance(result, str):
+                    return result
+
                 # MCP returns content as list of content blocks
-                content_blocks = result.get("content", [])
+                content_blocks = result.get("content", []) if isinstance(result, dict) else []
                 texts = []
                 for block in content_blocks:
-                    if block.get("type") == "text":
-                        texts.append(block.get("text", ""))
-                    elif block.get("type") == "image":
-                        texts.append(f"[图片: {block.get('mimeType', 'image')}]")
+                    if isinstance(block, str):
+                        texts.append(block)
+                    elif isinstance(block, dict):
+                        if block.get("type") == "text":
+                            texts.append(block.get("text", ""))
+                        elif block.get("type") == "image":
+                            texts.append(f"[图片: {block.get('mimeType', 'image')}]")
+                        else:
+                            texts.append(str(block))
                     else:
                         texts.append(str(block))
 
