@@ -157,6 +157,21 @@ docker compose up -d
 # → http://localhost:3000
 ```
 
+> **🇨🇳 Docker Registry Mirror (China users):** If `docker compose up -d` fails with a timeout, configure a Docker registry mirror first:
+> ```bash
+> sudo tee /etc/docker/daemon.json > /dev/null <<EOF
+> {
+>   "registry-mirrors": [
+>     "https://docker.1panel.live",
+>     "https://hub.rat.dev",
+>     "https://dockerpull.org"
+>   ]
+> }
+> EOF
+> sudo systemctl daemon-reload && sudo systemctl restart docker
+> ```
+> Then re-run `docker compose up -d`.
+
 ### First Login
 
 The first user to register automatically becomes the **platform admin**. Open the app, click "Register", and create your account.

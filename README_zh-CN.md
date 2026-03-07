@@ -149,6 +149,21 @@ docker compose up -d
 # → http://localhost:3000
 ```
 
+> **🇨🇳 Docker 镜像加速（国内用户）：** 如果 `docker compose up -d` 拉取镜像失败或超时，请先配置 Docker 镜像加速源：
+> ```bash
+> sudo tee /etc/docker/daemon.json > /dev/null <<EOF
+> {
+>   "registry-mirrors": [
+>     "https://docker.1panel.live",
+>     "https://hub.rat.dev",
+>     "https://dockerpull.org"
+>   ]
+> }
+> EOF
+> sudo systemctl daemon-reload && sudo systemctl restart docker
+> ```
+> 然后重新执行 `docker compose up -d`。
+
 ### 首次登录
 
 第一个注册的用户自动成为**平台管理员**。打开应用，点击"注册"，创建你的账号即可。
