@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s -X POST http://localhost:8008/api/agents/ -H \"Content-Type: application/json\" -d '{\"name\":\"test\"}' 2>&1 | head -20)",
+      "Bash(curl -s -X POST http://localhost:8008/api/register -H \"Content-Type: application/json\" -d '{\"username\":\"admin\",\"email\":\"admin@example.com\",\"password\":\"admin123\"}' | jq .)",
+      "Bash(curl -s http://localhost:8008/api/health | jq .)",
+      "Bash(cd backend && .venv/bin/python -c \"\nimport asyncio\nfrom app.database import async_session\nfrom app.models.user import User\nfrom sqlalchemy import select\n\nasync def check_users\\(\\):\n    async with async_session\\(\\) as db:\n        result = await db.execute\\(select\\(User\\)\\)\n        users = result.scalars\\(\\).all\\(\\)\n        if users:\n            print\\(f'已有 {len\\(users\\)} 个用户:'\\)\n            for u in users:\n                print\\(f'  - {u.username} \\({u.email}\\)'\\)\n        else:\n            print\\('数据库中还没有用户'\\)\n\nasyncio.run\\(check_users\\(\\)\\)\n\")",
+      "Bash(curl -s http://localhost:3008 | head -20)",
+      "Bash(psql postgresql://clawith:clawith@localhost:5432/clawith -c \"UPDATE llm_models SET api_format='anthropic-messages', base_url='https://api.minimaxi.com/v1' WHERE provider='minimax';\")"
+    ]
+  }
+}
