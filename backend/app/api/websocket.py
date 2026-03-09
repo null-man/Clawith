@@ -177,20 +177,37 @@ async def call_llm(
                 parts.append({"type": "text", "text": text})
             api_messages[i] = {**msg, "content": parts}
 
-    # Determine base URL
+    # Determine base URL and API format
     from app.services.llm_utils import get_provider_base_url, get_tool_params, get_max_tokens
     base_url = get_provider_base_url(model.provider, model.base_url)
 
     if not base_url:
         return f"[Error] No API endpoint configured for {model.provider}"
 
+    # Check API format (default to 'openai' for backward compatibility)
+    api_format = getattr(model, 'api_format', 'openai')
+
     url_base = base_url.rstrip('/')
-    if url_base.endswith('/chat/completions'):
-        url = url_base
-    else:
-        url = f"{url_base}/chat/completions"
     api_key = model.api_key_encrypted
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+
+    if api_format == 'anthropic-messages':
+        # Anthropic Messages API format
+        if url_base.endswith('/messages'):
+            url = url_base
+        else:
+            url = f"{url_base}/messages"
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01"
+        }
+    else:
+        # OpenAI format (default)
+        if url_base.endswith('/chat/completions'):
+            url = url_base
+        else:
+            url = f"{url_base}/chat/completions"
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
 
     # Tool-calling loop (configurable per agent, default 50)
     for round_i in range(_max_tool_rounds):
@@ -213,15 +230,52 @@ async def call_llm(
                 "role": "system",
                 "content": f"🚨 仅剩 2 轮工具调用。请立即保存进度到 agenda.md 并设置续接触发器。",
             })
-        payload = {
-            "model": model.model,
-            "messages": api_messages,
-            "temperature": 0.7,
-            "max_tokens": get_max_tokens(model.provider, model.model),  # provider-safe limit
-            "tools": tools_for_llm,
-            "stream": True,
-            **get_tool_params(model.provider),
-        }
+
+        # Build payload based on API format
+        if api_format == 'anthropic-messages':
+            # Anthropic Messages API format
+            # Extract system messages and convert to system parameter
+            system_content = []
+            non_system_messages = []
+            for msg in api_messages:
+                if msg.get("role") == "system":
+                    system_content.append(msg.get("content", ""))
+                else:
+                    non_system_messages.append(msg)
+
+            # Convert tools to Anthropic format
+            anthropic_tools = []
+            for tool in tools_for_llm:
+                anthropic_tools.append({
+                    "name": tool["function"]["name"],
+                    "description": tool["function"].get("description", ""),
+                    "input_schema": tool["function"].get("parameters", {})
+                })
+
+            payload = {
+                "model": model.model,
+                "messages": non_system_messages,
+                "temperature": 0.7,
+                "max_tokens": get_max_tokens(model.provider, model.model),
+                "stream": True,
+            }
+            # Only add system if there's content
+            if system_content:
+                payload["system"] = "\n\n".join(system_content)
+            # Only add tools if there are any
+            if anthropic_tools:
+                payload["tools"] = anthropic_tools
+        else:
+            # OpenAI format (default)
+            payload = {
+                "model": model.model,
+                "messages": api_messages,
+                "temperature": 0.7,
+                "max_tokens": get_max_tokens(model.provider, model.model),  # provider-safe limit
+                "tools": tools_for_llm,
+                "stream": True,
+                **get_tool_params(model.provider),
+            }
 
         # Stream the response (with retry for connection errors)
         full_content = ""
@@ -252,129 +306,238 @@ async def call_llm(
                             line_count += 1
                             if line_count <= 3:
                                 print(f"[LLM-DBG] line#{line_count}: {line[:200]}", flush=True)
-                            if not line.startswith("data: "):
-                                continue
-                            data_str = line[6:]
-                            if data_str.strip() == "[DONE]":
-                                break
-                            try:
-                                chunk = _json.loads(data_str)
-                            except _json.JSONDecodeError:
-                                continue
 
-                            if "error" in chunk:
-                                return f"[LLM Error] {chunk['error'].get('message', str(chunk['error']))[:200]}"
+                            if api_format == 'anthropic-messages':
+                                # Anthropic Messages API streaming format
+                                if not line.startswith("event: ") and not line.startswith("data: "):
+                                    continue
 
-                            choices = chunk.get("choices", [])
-                            if not choices:
-                                continue
-                            choice = choices[0]
-                            delta = choice.get("delta", {})
-                            fr = choice.get("finish_reason")
-                            if fr:
-                                last_finish_reason = fr
+                                if line.startswith("event: "):
+                                    event_type = line[7:].strip()
+                                    continue
 
-                            # Debug: log first few chunks to diagnose empty content
-                            if len(full_content) == 0 and not tool_calls_data:
-                                print(f"[LLM-DBG] chunk: delta={delta}, finish={fr}", flush=True)
+                                if line.startswith("data: "):
+                                    data_str = line[6:]
+                                    try:
+                                        chunk = _json.loads(data_str)
+                                    except _json.JSONDecodeError:
+                                        continue
 
-                            # Text content — filter out <think>...</think> blocks
-                            if delta.get("content"):
-                                text = delta["content"]
-                                full_content += text
+                                    if "error" in chunk:
+                                        return f"[LLM Error] {chunk['error'].get('message', str(chunk['error']))[:200]}"
 
-                                # ── streaming think-tag filter ──
-                                # Process text through a simple state machine:
-                                #   _in_think=False: emit text via on_chunk
-                                #   _in_think=True:  emit text via on_thinking
-                                # We buffer chars that *might* be part of a tag to
-                                # avoid sending partial tags to the client.
-                                _tag_buffer += text
-                                emit = ""
-                                think_emit = ""
-                                i = 0
-                                buf = _tag_buffer
-                                while i < len(buf):
-                                    if not _in_think:
-                                        # Look for <think> open tag
-                                        if buf[i] == '<':
-                                            tag_candidate = buf[i:]
-                                            open_tag = "<think>"
-                                            if tag_candidate.startswith(open_tag):
-                                                _in_think = True
-                                                i += len(open_tag)
-                                                continue
-                                            elif open_tag.startswith(tag_candidate):
-                                                # Partial match — keep in buffer, wait for more
-                                                _tag_buffer = buf[i:]
-                                                break
+                                    chunk_type = chunk.get("type")
+
+                                    # Handle content_block_delta for text
+                                    if chunk_type == "content_block_delta":
+                                        delta = chunk.get("delta", {})
+                                        if delta.get("type") == "text_delta":
+                                            text = delta.get("text", "")
+                                            if text:
+                                                full_content += text
+                                                # Apply think-tag filter (same as OpenAI)
+                                                _tag_buffer += text
+                                                emit = ""
+                                                think_emit = ""
+                                                i = 0
+                                                buf = _tag_buffer
+                                                while i < len(buf):
+                                                    if not _in_think:
+                                                        if buf[i] == '<':
+                                                            tag_candidate = buf[i:]
+                                                            open_tag = "<think>"
+                                                            if tag_candidate.startswith(open_tag):
+                                                                _in_think = True
+                                                                i += len(open_tag)
+                                                                continue
+                                                            elif open_tag.startswith(tag_candidate):
+                                                                _tag_buffer = buf[i:]
+                                                                break
+                                                            else:
+                                                                emit += buf[i]
+                                                                i += 1
+                                                        else:
+                                                            emit += buf[i]
+                                                            i += 1
+                                                    else:
+                                                        if buf[i] == '<':
+                                                            tag_candidate = buf[i:]
+                                                            close_tag = "</think>"
+                                                            if tag_candidate.startswith(close_tag):
+                                                                _in_think = False
+                                                                i += len(close_tag)
+                                                                continue
+                                                            elif close_tag.startswith(tag_candidate):
+                                                                _tag_buffer = buf[i:]
+                                                                break
+                                                            else:
+                                                                think_emit += buf[i]
+                                                                i += 1
+                                                        else:
+                                                            think_emit += buf[i]
+                                                            i += 1
+                                                else:
+                                                    _tag_buffer = ""
+
+                                                if think_emit and on_thinking:
+                                                    try:
+                                                        await on_thinking(think_emit)
+                                                    except Exception:
+                                                        pass
+                                                if emit and on_chunk:
+                                                    try:
+                                                        await on_chunk(emit)
+                                                    except Exception:
+                                                        pass
+
+                                        # Handle input_json_delta for tool calls
+                                        elif delta.get("type") == "input_json_delta":
+                                            partial_json = delta.get("partial_json", "")
+                                            if tool_calls_data:
+                                                tool_calls_data[-1]["function"]["arguments"] += partial_json
+
+                                    # Handle content_block_start for tool calls
+                                    elif chunk_type == "content_block_start":
+                                        content_block = chunk.get("content_block", {})
+                                        if content_block.get("type") == "tool_use":
+                                            tool_id = content_block.get("id", "")
+                                            tool_name = content_block.get("name", "")
+                                            print(f"[LLM-DBG] Anthropic tool_use: id={tool_id}, name={tool_name}", flush=True)
+                                            tool_calls_data.append({
+                                                "id": tool_id,
+                                                "function": {
+                                                    "name": tool_name,
+                                                    "arguments": ""
+                                                }
+                                            })
+
+                                    # Handle message_delta for finish reason
+                                    elif chunk_type == "message_delta":
+                                        delta = chunk.get("delta", {})
+                                        stop_reason = delta.get("stop_reason")
+                                        if stop_reason:
+                                            last_finish_reason = "stop" if stop_reason == "end_turn" else stop_reason
+
+                                    # Handle message_stop
+                                    elif chunk_type == "message_stop":
+                                        break
+                            else:
+                                # OpenAI format streaming
+                                if not line.startswith("data: "):
+                                    continue
+                                data_str = line[6:]
+                                if data_str.strip() == "[DONE]":
+                                    break
+                                try:
+                                    chunk = _json.loads(data_str)
+                                except _json.JSONDecodeError:
+                                    continue
+
+                                if "error" in chunk:
+                                    return f"[LLM Error] {chunk['error'].get('message', str(chunk['error']))[:200]}"
+
+                                choices = chunk.get("choices", [])
+                                if not choices:
+                                    continue
+                                choice = choices[0]
+                                delta = choice.get("delta", {})
+                                fr = choice.get("finish_reason")
+                                if fr:
+                                    last_finish_reason = fr
+
+                                # Debug: log first few chunks to diagnose empty content
+                                if len(full_content) == 0 and not tool_calls_data:
+                                    print(f"[LLM-DBG] chunk: delta={delta}, finish={fr}", flush=True)
+
+                                # Text content — filter out <think>...</think> blocks
+                                if delta.get("content"):
+                                    text = delta["content"]
+                                    full_content += text
+
+                                    # ── streaming think-tag filter ──
+                                    _tag_buffer += text
+                                    emit = ""
+                                    think_emit = ""
+                                    i = 0
+                                    buf = _tag_buffer
+                                    while i < len(buf):
+                                        if not _in_think:
+                                            if buf[i] == '<':
+                                                tag_candidate = buf[i:]
+                                                open_tag = "<think>"
+                                                if tag_candidate.startswith(open_tag):
+                                                    _in_think = True
+                                                    i += len(open_tag)
+                                                    continue
+                                                elif open_tag.startswith(tag_candidate):
+                                                    _tag_buffer = buf[i:]
+                                                    break
+                                                else:
+                                                    emit += buf[i]
+                                                    i += 1
                                             else:
                                                 emit += buf[i]
                                                 i += 1
                                         else:
-                                            emit += buf[i]
-                                            i += 1
-                                    else:
-                                        # Inside <think> — look for </think> close tag
-                                        if buf[i] == '<':
-                                            tag_candidate = buf[i:]
-                                            close_tag = "</think>"
-                                            if tag_candidate.startswith(close_tag):
-                                                _in_think = False
-                                                i += len(close_tag)
-                                                continue
-                                            elif close_tag.startswith(tag_candidate):
-                                                _tag_buffer = buf[i:]
-                                                break
+                                            if buf[i] == '<':
+                                                tag_candidate = buf[i:]
+                                                close_tag = "</think>"
+                                                if tag_candidate.startswith(close_tag):
+                                                    _in_think = False
+                                                    i += len(close_tag)
+                                                    continue
+                                                elif close_tag.startswith(tag_candidate):
+                                                    _tag_buffer = buf[i:]
+                                                    break
+                                                else:
+                                                    think_emit += buf[i]
+                                                    i += 1
                                             else:
                                                 think_emit += buf[i]
                                                 i += 1
-                                        else:
-                                            think_emit += buf[i]
-                                            i += 1
-                                else:
-                                    _tag_buffer = ""  # fully consumed
+                                    else:
+                                        _tag_buffer = ""
 
-                                if think_emit and on_thinking:
-                                    try:
-                                        await on_thinking(think_emit)
-                                    except Exception:
-                                        pass
-                                if emit and on_chunk:
-                                    try:
-                                        await on_chunk(emit)
-                                    except Exception:
-                                        pass
+                                    if think_emit and on_thinking:
+                                        try:
+                                            await on_thinking(think_emit)
+                                        except Exception:
+                                            pass
+                                    if emit and on_chunk:
+                                        try:
+                                            await on_chunk(emit)
+                                        except Exception:
+                                            pass
 
-                            # Tool calls (accumulate across streaming chunks)
-                            if delta.get("tool_calls"):
-                                for tc_delta in delta["tool_calls"]:
-                                    idx = tc_delta.get("index", 0)
-                                    while len(tool_calls_data) <= idx:
-                                        tool_calls_data.append({"id": "", "function": {"name": "", "arguments": ""}})
-                                    tc = tool_calls_data[idx]
-                                    if tc_delta.get("id"):
-                                        tc["id"] = tc_delta["id"]
-                                    fn_delta = tc_delta.get("function") or {}
-                                    if fn_delta.get("name"):
-                                        tc["function"]["name"] += fn_delta["name"]
-                                    # Accumulate arguments — must use 'is not None' since '' is valid
-                                    arg_chunk = fn_delta.get("arguments")
-                                    if arg_chunk is not None:
-                                        if isinstance(arg_chunk, dict):
-                                            # Some providers send pre-parsed JSON
-                                            import json as _j2
-                                            tc["function"]["arguments"] = _j2.dumps(arg_chunk, ensure_ascii=False)
-                                        else:
-                                            tc["function"]["arguments"] += str(arg_chunk)
-                                    # Also check for 'input' field (Anthropic/Bedrock native format)
-                                    if "input" in fn_delta:
-                                        inp = fn_delta["input"]
-                                        if isinstance(inp, dict):
-                                            import json as _j3
-                                            tc["function"]["arguments"] = _j3.dumps(inp, ensure_ascii=False)
-                                        elif isinstance(inp, str) and inp:
-                                            tc["function"]["arguments"] += inp
+                                # Tool calls (accumulate across streaming chunks)
+                                if delta.get("tool_calls"):
+                                    for tc_delta in delta["tool_calls"]:
+                                        idx = tc_delta.get("index", 0)
+                                        while len(tool_calls_data) <= idx:
+                                            tool_calls_data.append({"id": "", "function": {"name": "", "arguments": ""}})
+                                        tc = tool_calls_data[idx]
+                                        if tc_delta.get("id"):
+                                            tc["id"] = tc_delta["id"]
+                                        fn_delta = tc_delta.get("function") or {}
+                                        if fn_delta.get("name"):
+                                            tc["function"]["name"] += fn_delta["name"]
+                                        # Accumulate arguments — must use 'is not None' since '' is valid
+                                        arg_chunk = fn_delta.get("arguments")
+                                        if arg_chunk is not None:
+                                            if isinstance(arg_chunk, dict):
+                                                # Some providers send pre-parsed JSON
+                                                import json as _j2
+                                                tc["function"]["arguments"] = _j2.dumps(arg_chunk, ensure_ascii=False)
+                                            else:
+                                                tc["function"]["arguments"] += str(arg_chunk)
+                                        # Also check for 'input' field (Anthropic/Bedrock native format)
+                                        if "input" in fn_delta:
+                                            inp = fn_delta["input"]
+                                            if isinstance(inp, dict):
+                                                import json as _j3
+                                                tc["function"]["arguments"] = _j3.dumps(inp, ensure_ascii=False)
+                                            elif isinstance(inp, str) and inp:
+                                                tc["function"]["arguments"] += inp
 
                 break  # Success — exit retry loop
 
@@ -424,9 +587,26 @@ async def call_llm(
 
         # Execute tool calls
         print(f"[LLM] Round {round_i+1}: {len(tool_calls_data)} tool call(s)")
-        msg_with_tools = {"role": "assistant", "content": full_content or None, "tool_calls": [
-            {"id": tc["id"], "type": "function", "function": tc["function"]} for tc in tool_calls_data
-        ]}
+
+        if api_format == 'anthropic-messages':
+            # Anthropic Messages API format
+            # Build content array with text and tool_use blocks
+            content_blocks = []
+            if full_content:
+                content_blocks.append({"type": "text", "text": full_content})
+            for tc in tool_calls_data:
+                content_blocks.append({
+                    "type": "tool_use",
+                    "id": tc["id"],
+                    "name": tc["function"]["name"],
+                    "input": _json.loads(tc["function"].get("arguments", "{}")) if tc["function"].get("arguments") else {}
+                })
+            msg_with_tools = {"role": "assistant", "content": content_blocks}
+        else:
+            # OpenAI format
+            msg_with_tools = {"role": "assistant", "content": full_content or None, "tool_calls": [
+                {"id": tc["id"], "type": "function", "function": tc["function"]} for tc in tool_calls_data
+            ]}
         api_messages.append(msg_with_tools)
 
         for tc in tool_calls_data:
@@ -461,11 +641,25 @@ async def call_llm(
                 except Exception:
                     pass
 
-            api_messages.append({
-                "role": "tool",
-                "tool_call_id": tc["id"],
-                "content": result,
-            })
+            if api_format == 'anthropic-messages':
+                # Anthropic Messages API format - tool results go in user message
+                tool_result_msg = {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": tc["id"],
+                        "content": result,
+                    }]
+                }
+                print(f"[LLM-DBG] Sending tool_result: tool_use_id={tc['id']}, result_len={len(result)}", flush=True)
+                api_messages.append(tool_result_msg)
+            else:
+                # OpenAI format
+                api_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": result,
+                })
 
     return "[Error] Too many tool call rounds"
 
@@ -608,9 +802,11 @@ async def websocket_chat(
     # IMPORTANT: Include tool_call messages so the LLM maintains tool-calling behavior.
     # Without them, Claude sees user→assistant-text patterns and learns to skip tools.
     conversation: list[dict] = []
+    api_format = getattr(llm_model, 'api_format', 'openai') if llm_model else 'openai'
+
     for msg in history_messages:
         if msg.role == "tool_call":
-            # Convert stored tool_call JSON into OpenAI-format assistant+tool pair
+            # Convert stored tool_call JSON into format matching current model
             try:
                 import json as _j_hist
                 tc_data = _j_hist.loads(msg.content)
@@ -618,22 +814,44 @@ async def websocket_chat(
                 tc_args = tc_data.get("args", {})
                 tc_result = tc_data.get("result", "")
                 tc_id = f"call_{msg.id}"  # synthetic tool_call_id
-                # Assistant message with tool_calls array
-                conversation.append({
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [{
-                        "id": tc_id,
-                        "type": "function",
-                        "function": {"name": tc_name, "arguments": _j_hist.dumps(tc_args, ensure_ascii=False)},
-                    }],
-                })
-                # Tool result message
-                conversation.append({
-                    "role": "tool",
-                    "tool_call_id": tc_id,
-                    "content": str(tc_result)[:500],
-                })
+
+                if api_format == 'anthropic-messages':
+                    # Anthropic format: assistant message with content array
+                    conversation.append({
+                        "role": "assistant",
+                        "content": [{
+                            "type": "tool_use",
+                            "id": tc_id,
+                            "name": tc_name,
+                            "input": tc_args
+                        }]
+                    })
+                    # Tool result in user message
+                    conversation.append({
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": tc_id,
+                            "content": str(tc_result)[:500]
+                        }]
+                    })
+                else:
+                    # OpenAI format: assistant message with tool_calls array
+                    conversation.append({
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": tc_id,
+                            "type": "function",
+                            "function": {"name": tc_name, "arguments": _j_hist.dumps(tc_args, ensure_ascii=False)},
+                        }],
+                    })
+                    # Tool result message
+                    conversation.append({
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": str(tc_result)[:500],
+                    })
             except Exception:
                 continue  # Skip malformed tool_call records
         else:

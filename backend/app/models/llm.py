@@ -20,6 +20,7 @@ class LLMModel(Base):
     model: Mapped[str] = mapped_column(String(100), nullable=False)  # claude-opus-4-6, gpt-4o, etc.
     api_key_encrypted: Mapped[str] = mapped_column(String(500), nullable=False)
     base_url: Mapped[str | None] = mapped_column(String(500))
+    api_format: Mapped[str] = mapped_column(String(20), nullable=False, server_default='openai')
     label: Mapped[str] = mapped_column(String(200), nullable=False)  # Display name
     max_tokens_per_day: Mapped[int | None] = mapped_column(Integer)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
