@@ -16,6 +16,12 @@ venv/
 # Runtime agent data
 backend/data/
 backend/agent_data/
+backend/backend/agent_data/
+
+# Playwright browser binaries
+**/Library/Caches/ms-playwright/
+**/Library/Python/*/lib/python/site-packages/playwright/driver/
+**/.playwright/
 ss-nodes.json
 
 # Ignore Antigravity / Claude Code agent configurations

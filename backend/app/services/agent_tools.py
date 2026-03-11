@@ -1812,7 +1812,13 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
             async def call_llm(model: LLMModel, system: str, messages_list: list[dict]) -> str:
                 from app.services.llm_utils import get_provider_base_url
                 base_url = get_provider_base_url(model.provider, model.base_url)
-                url = f"{base_url.rstrip('/')}/chat/completions"
+
+                # 根据 provider 选择正确的端点
+                if model.provider == "minimax":
+                    url = f"{base_url.rstrip('/')}/messages"  # Anthropic 风格
+                else:
+                    url = f"{base_url.rstrip('/')}/chat/completions"  # OpenAI 风格
+
                 full_msgs = [{"role": "system", "content": system}] + messages_list
                 async with httpx.AsyncClient(timeout=60) as client:
                     resp = await client.post(
@@ -1821,9 +1827,20 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                         headers={"Authorization": f"Bearer {model.api_key_encrypted}"},
                     )
                     data = resp.json()
-                if "choices" in data and data["choices"]:
-                    return data["choices"][0].get("message", {}).get("content", "")
-                return ""
+
+                # 根据 provider 解析响应
+                if model.provider == "minimax":
+                    # Anthropic 风格: {"content": [{"type": "text", "text": "..."}]}
+                    if "content" in data and isinstance(data["content"], list):
+                        for block in data["content"]:
+                            if block.get("type") == "text":
+                                return block.get("text", "")
+                    return ""
+                else:
+                    # OpenAI 风格: {"choices": [{"message": {"content": "..."}}]}
+                    if "choices" in data and data["choices"]:
+                        return data["choices"][0].get("message", {}).get("content", "")
+                    return ""
 
             # Save a message as ChatMessage
             async def save_msg(sender_agent_id, content, role):

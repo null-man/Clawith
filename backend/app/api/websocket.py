@@ -5,6 +5,7 @@ import uuid
 
 import httpx
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from starlette.websockets import WebSocketState
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -860,7 +861,11 @@ async def websocket_chat(
     try:
         while True:
             print(f"[WS] Waiting for message from {agent_name}...")
-            data = await websocket.receive_json()
+            try:
+                data = await websocket.receive_json()
+            except RuntimeError as e:
+                print(f"[WS] Connection closed while waiting for message: {e}")
+                break
             content = data.get("content", "")
             display_content = data.get("display_content", "")  # User-facing display text
             file_name = data.get("file_name", "")  # Original file name for attachment display
@@ -1053,12 +1058,15 @@ async def websocket_chat(
             print("[WS] Assistant message saved")
 
             # Send done signal with final content (for non-streaming clients)
-            await websocket.send_json({
-                "type": "done",
-                "role": "assistant",
-                "content": assistant_response,
-            })
-            print("[WS] Response done sent to client")
+            try:
+                await websocket.send_json({
+                    "type": "done",
+                    "role": "assistant",
+                    "content": assistant_response,
+                })
+                print("[WS] Response done sent to client")
+            except RuntimeError as e:
+                print(f"[WS] Cannot send done signal, connection closed: {e}")
 
     except WebSocketDisconnect:
         print(f"[WS] Client disconnected: {agent_name}")
