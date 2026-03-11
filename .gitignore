@@ -29,3 +29,4 @@ ss-nodes.json
 .agents/
 _agent/
 _agents/
+backend/backend/agent_data/*/workspace/Library/

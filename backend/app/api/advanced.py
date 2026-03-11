@@ -224,32 +224,41 @@ async def get_agent_metrics(
     agent, _access = await check_agent_access(db, current_user, agent_id)
 
     # Task stats
-    total_tasks = await db.execute(select(func.count(Task.id)).where(Task.agent_id == agent_id))
-    done_tasks = await db.execute(
+    total_tasks_result = await db.execute(select(func.count(Task.id)).where(Task.agent_id == agent_id))
+    total_tasks = total_tasks_result.scalar() or 0
+
+    done_tasks_result = await db.execute(
         select(func.count(Task.id)).where(Task.agent_id == agent_id, Task.status == "done")
     )
-    pending_tasks = await db.execute(
+    done_tasks = done_tasks_result.scalar() or 0
+
+    pending_tasks_result = await db.execute(
         select(func.count(Task.id)).where(Task.agent_id == agent_id, Task.status == "pending")
     )
+    pending_tasks = pending_tasks_result.scalar() or 0
 
     # Approval stats
-    total_approvals = await db.execute(
+    total_approvals_result = await db.execute(
         select(func.count(ApprovalRequest.id)).where(ApprovalRequest.agent_id == agent_id)
     )
-    pending_approvals = await db.execute(
+    total_approvals = total_approvals_result.scalar() or 0
+
+    pending_approvals_result = await db.execute(
         select(func.count(ApprovalRequest.id)).where(
             ApprovalRequest.agent_id == agent_id, ApprovalRequest.status == "pending"
         )
     )
+    pending_approvals = pending_approvals_result.scalar() or 0
 
     # Recent activity count (last 24h)
     from datetime import datetime, timedelta, timezone
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-    recent_actions = await db.execute(
+    recent_actions_result = await db.execute(
         select(func.count(AuditLog.id)).where(
             AuditLog.agent_id == agent_id, AuditLog.created_at >= cutoff
         )
     )
+    recent_actions = recent_actions_result.scalar() or 0
 
     # Container status
     from app.services.agent_manager import agent_manager
@@ -267,18 +276,18 @@ async def get_agent_metrics(
             "limit_month": agent.max_tokens_per_month,
         },
         "tasks": {
-            "total": total_tasks.scalar() or 0,
-            "done": done_tasks.scalar() or 0,
-            "pending": pending_tasks.scalar() or 0,
+            "total": total_tasks,
+            "done": done_tasks,
+            "pending": pending_tasks,
             "completion_rate": round(
-                (done_tasks.scalar() or 0) / max(total_tasks.scalar() or 1, 1) * 100, 1
+                done_tasks / max(total_tasks, 1) * 100, 1
             ),
         },
         "approvals": {
-            "total": total_approvals.scalar() or 0,
-            "pending": pending_approvals.scalar() or 0,
+            "total": total_approvals,
+            "pending": pending_approvals,
         },
         "activity": {
-            "actions_last_24h": recent_actions.scalar() or 0,
+            "actions_last_24h": recent_actions,
         },
     }
